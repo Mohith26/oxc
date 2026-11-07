@@ -333,7 +333,8 @@ impl Rule for NoUselessUndefined {
 
                             if ctx.source_type().is_typescript()
                                 && (!assign_pattern.pattern.is_binding_identifier()
-                                    || assign_pattern.type_annotation.is_none())
+                                    || assign_pattern.type_annotation.is_none()
+                                    || assign_pattern.has_modifier())
                             {
                                 ctx.diagnostic(no_useless_undefined_diagnostic(
                                     undefined_literal.span,
@@ -1462,6 +1463,22 @@ fn test_inferred_destructured_parameter_types() {
         "function f({x = undefined}): number { return 1; } f({});",
         "function f([{x = undefined}]): number { return 1; } f([{}]);",
         "function f([x = undefined] = []): number { return 1; } f();",
+    ];
+    let fix = fail.iter().map(|source| (*source, *source, None)).collect();
+    Tester::new(NoUselessUndefined::NAME, NoUselessUndefined::PLUGIN, vec![], fail)
+        .expect_fix(fix)
+        .test();
+}
+
+#[test]
+fn test_parameter_property_types() {
+    use crate::tester::Tester;
+
+    let fail = vec![
+        "class C { constructor(public x: number | undefined = undefined) {} } const c: { x: number | undefined } = new C();",
+        "class C { constructor(readonly x: number | undefined = undefined) {} }",
+        "class C { constructor(private x: number | undefined = undefined) {} }",
+        "class C { constructor(protected x: number | undefined = undefined) {} }",
     ];
     let fix = fail.iter().map(|source| (*source, *source, None)).collect();
     Tester::new(NoUselessUndefined::NAME, NoUselessUndefined::PLUGIN, vec![], fail)
