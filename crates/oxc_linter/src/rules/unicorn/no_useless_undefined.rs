@@ -1,6 +1,6 @@
 use oxc_ast::{
     AstKind,
-    ast::{Argument, CallExpression, Expression},
+    ast::{Argument, CallExpression, Expression, VariableDeclarationKind},
 };
 use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::{
     AstNode,
-    ast_util::{is_method_call, outermost_paren_parent},
+    ast_util::{is_method_call, outermost_paren},
     context::LintContext,
     rule::{DefaultRuleConfig, Rule},
 };
@@ -162,9 +162,9 @@ impl Rule for NoUselessUndefined {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         match node.kind() {
             AstKind::IdentifierReference(undefined_literal) if undefined_literal.is_undefined() => {
-                let Some(parent_node) = outermost_paren_parent(node, ctx) else {
-                    return;
-                };
+                let undefined_node = outermost_paren(node, ctx);
+                let undefined_span = undefined_node.span();
+                let parent_node = ctx.nodes().parent_node(undefined_node.id());
                 let parent_node_kind = parent_node.kind();
 
                 match parent_node_kind {
@@ -177,13 +177,16 @@ impl Rule for NoUselessUndefined {
                             no_useless_undefined_diagnostic(undefined_literal.span),
                             |fixer| {
                                 let delete_span = if let Some(comment) = ctx
-                                    .comments_range(ret_stmt.span.start..ret_stmt.span.end)
+                                    .comments_range(ret_stmt.span.start..undefined_span.start)
                                     .next_back()
                                 {
-                                    Span::new(comment.span.end, undefined_literal.span.end)
+                                    Span::new(comment.span.end, undefined_span.end)
                                 } else {
-                                    Span::new(ret_stmt.span().start + 6, undefined_literal.span.end)
+                                    Span::new(ret_stmt.span.start + 6, undefined_span.end)
                                 };
+                                if ctx.has_comments_between(delete_span) {
+                                    return fixer.noop();
+                                }
                                 fixer.delete_range(delete_span)
                             },
                         );
@@ -195,7 +198,12 @@ impl Rule for NoUselessUndefined {
                         }
                         ctx.diagnostic_with_fix(
                             no_useless_undefined_diagnostic(undefined_literal.span),
-                            |fixer| fixer.replace(yield_expr.span, "yield"),
+                            |fixer| {
+                                if ctx.has_comments_between(yield_expr.span) {
+                                    return fixer.noop();
+                                }
+                                fixer.replace(yield_expr.span, "yield")
+                            },
                         );
                     }
                     // `() => undefined`
@@ -210,10 +218,14 @@ impl Rule for NoUselessUndefined {
 
                         ctx.diagnostic_with_fix(
                             no_useless_undefined_diagnostic(undefined_literal.span),
-                            |fixer| fixer.replace(arrow.body.span(), "{}"),
+                            |fixer| {
+                                if ctx.has_comments_between(arrow.body.span()) {
+                                    return fixer.noop();
+                                }
+                                fixer.replace(arrow.body.span(), "{}")
+                            },
                         );
                     }
-                    // `let foo = undefined` / `var foo = undefined`
                     AstKind::VariableDeclarator(variable_declarator) => {
                         let grand_parent_node = ctx.nodes().parent_node(parent_node.id());
                         let grand_parent_node_kind = grand_parent_node.kind();
@@ -221,7 +233,9 @@ impl Rule for NoUselessUndefined {
                         else {
                             return;
                         };
-                        if declaration.kind.is_const() {
+                        if declaration.kind != VariableDeclarationKind::Let
+                            || !variable_declarator.id.is_binding_identifier()
+                        {
                             return;
                         }
                         if is_has_function_return_type(parent_node, ctx) {
@@ -230,29 +244,41 @@ impl Rule for NoUselessUndefined {
                         ctx.diagnostic_with_fix(
                             no_useless_undefined_diagnostic(undefined_literal.span),
                             |fixer| {
-                                fixer.delete_range(Span::new(
-                                    variable_declarator.id.span().end,
-                                    undefined_literal.span.end,
-                                ))
+                                let start = variable_declarator
+                                    .type_annotation
+                                    .as_ref()
+                                    .map_or(variable_declarator.id.span().end, |annotation| {
+                                        annotation.span.end
+                                    });
+                                let delete_span = Span::new(start, undefined_span.end);
+                                if ctx.has_comments_between(delete_span) {
+                                    return fixer.noop();
+                                }
+                                fixer.delete_range(delete_span)
                             },
                         );
                     }
                     // `const {foo = undefined} = {}`
                     AstKind::AssignmentPattern(assign_pattern) => {
                         let left = &assign_pattern.left;
-                        let delete_span = Span::new(left.span().end, undefined_literal.span.end);
+                        let delete_span = Span::new(left.span().end, undefined_span.end);
                         if is_has_function_return_type(parent_node, ctx) {
                             return;
                         }
                         ctx.diagnostic_with_fix(
                             no_useless_undefined_diagnostic(undefined_literal.span),
-                            |fixer| fixer.delete_range(delete_span),
+                            |fixer| {
+                                if ctx.has_comments_between(delete_span) {
+                                    return fixer.noop();
+                                }
+                                fixer.delete_range(delete_span)
+                            },
                         );
                     }
                     // `function foo(bar = undefined) {}`
                     AstKind::FormalParameter(assign_pattern) => {
                         if let Some(initializer) = &assign_pattern.initializer
-                            && initializer.span() == undefined_literal.span
+                            && initializer.span() == undefined_span
                         {
                             let formal_parameters = ctx.nodes().parent_node(parent_node.id());
                             let AstKind::FormalParameters(formal_parameters) =
@@ -279,13 +305,18 @@ impl Rule for NoUselessUndefined {
                                 .map_or(assign_pattern.pattern.span().end, |type_annotation| {
                                     type_annotation.span.end
                                 });
-                            let delete_span = Span::new(*left, undefined_literal.span.end);
+                            let delete_span = Span::new(*left, undefined_span.end);
                             if is_has_function_return_type(parent_node, ctx) {
                                 return;
                             }
                             ctx.diagnostic_with_fix(
                                 no_useless_undefined_diagnostic(undefined_literal.span),
-                                |fixer| fixer.delete_range(delete_span),
+                                |fixer| {
+                                    if ctx.has_comments_between(delete_span) {
+                                        return fixer.noop();
+                                    }
+                                    fixer.delete_range(delete_span)
+                                },
                             );
                         }
                     }
@@ -666,8 +697,6 @@ fn test() {
         ("function* foo() {yield                 undefined;}", "function* foo() {yield;}", None),
         ("let a = undefined;", "let a;", None),
         ("let a = undefined, b = 2;", "let a, b = 2;", None),
-        ("var a = undefined;", "var a;", None),
-        ("var a = undefined, b = 2;", "var a, b = 2;", None),
         ("foo(undefined);", "foo();", None),
         ("foo(undefined, undefined);", "foo();", None),
         ("foo(undefined,);", "foo();", None),
@@ -802,6 +831,99 @@ fn test_trailing_arguments() {
     let fix = vec![
         ("call(...values, undefined, undefined);", "call(...values);", None),
         ("call?.(value, undefined, undefined);", "call?.(value);", None),
+    ];
+    Tester::new(NoUselessUndefined::NAME, NoUselessUndefined::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test();
+}
+
+#[test]
+fn test_safe_initializer_removal() {
+    use crate::tester::Tester;
+
+    let pass = vec![
+        "var a = undefined;",
+        "var a = (undefined), b = 2;",
+        "for (const item of items) { var value = undefined; value ??= item; }",
+        "let [a] = undefined;",
+        "let {a} = undefined;",
+        "let [a] = (undefined);",
+        "using a = undefined;",
+        "async function f() { await using a = undefined; }",
+    ];
+    let fail = vec![
+        "let a = /* keep */ undefined;",
+        "let a /* keep */ = undefined;",
+        "let a = (undefined /* keep */);",
+        "const {a = /* keep */ undefined} = {};",
+        "const [a = (/* keep */ undefined)] = [];",
+        "function f(a = /* keep */ undefined) {}",
+        "function f() { return (/* keep */ undefined); }",
+        "function* f() { yield (/* keep */ undefined); }",
+        "const f = () => (/* keep */ undefined);",
+    ];
+    let fix = vec![
+        ("let a = (undefined);", "let a;", None),
+        ("let a = (((undefined))), b = 2;", "let a, b = 2;", None),
+        ("let a: number | undefined = undefined;", "let a: number | undefined;", None),
+        ("let a: number | undefined = ((undefined));", "let a: number | undefined;", None),
+        (
+            "let a: /* keep */ number | undefined = undefined;",
+            "let a: /* keep */ number | undefined;",
+            None,
+        ),
+        ("let a = undefined /* keep */;", "let a /* keep */;", None),
+        ("const {a = (undefined)} = {};", "const {a} = {};", None),
+        ("const [a = ((undefined))] = [];", "const [a] = [];", None),
+        ("function f() { return(undefined); }", "function f() { return; }", None),
+        ("function f() { return ((undefined)); }", "function f() { return; }", None),
+        (
+            "function f() { return /* keep */ (undefined); }",
+            "function f() { return /* keep */; }",
+            None,
+        ),
+        (
+            "function f() { return(undefined) /* keep */; }",
+            "function f() { return /* keep */; }",
+            None,
+        ),
+        ("function* f() { yield((undefined)); }", "function* f() { yield; }", None),
+        ("const f = () => ((undefined));", "const f = () => {};", None),
+        ("function f(a = ((undefined))) {}", "function f(a) {}", None),
+        (
+            "function f(a: number | undefined = (undefined)) {}",
+            "function f(a: number | undefined) {}",
+            None,
+        ),
+        ("let a = /* keep */ undefined;", "let a = /* keep */ undefined;", None),
+        ("let a /* keep */ = undefined;", "let a /* keep */ = undefined;", None),
+        ("let a = (undefined /* keep */);", "let a = (undefined /* keep */);", None),
+        ("const {a = /* keep */ undefined} = {};", "const {a = /* keep */ undefined} = {};", None),
+        (
+            "const [a = (/* keep */ undefined)] = [];",
+            "const [a = (/* keep */ undefined)] = [];",
+            None,
+        ),
+        (
+            "function f(a = /* keep */ undefined) {}",
+            "function f(a = /* keep */ undefined) {}",
+            None,
+        ),
+        (
+            "function f() { return (/* keep */ undefined); }",
+            "function f() { return (/* keep */ undefined); }",
+            None,
+        ),
+        (
+            "function* f() { yield (/* keep */ undefined); }",
+            "function* f() { yield (/* keep */ undefined); }",
+            None,
+        ),
+        (
+            "const f = () => (/* keep */ undefined);",
+            "const f = () => (/* keep */ undefined);",
+            None,
+        ),
     ];
     Tester::new(NoUselessUndefined::NAME, NoUselessUndefined::PLUGIN, pass, fail)
         .expect_fix(fix)
