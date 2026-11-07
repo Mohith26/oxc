@@ -1,6 +1,6 @@
 use oxc_ast::{
     AstKind,
-    ast::{Argument, CallExpression, Expression},
+    ast::{Argument, CallExpression, Expression, TSType},
 };
 use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
@@ -143,15 +143,19 @@ fn is_function_bind_call(call_expr: &CallExpression) -> bool {
     !call_expr.optional && is_method_call(call_expr, None, Some(&["bind"]), None, None)
 }
 
-fn is_has_function_return_type(node: &AstNode, ctx: &LintContext<'_>) -> bool {
-    match node.kind() {
-        AstKind::Program(_) => false,
-        AstKind::ArrowFunctionExpression(arrow_func_express) => {
-            arrow_func_express.return_type.is_some()
-        }
-        AstKind::Function(func) => func.return_type.is_some(),
-        _ => is_has_function_return_type(ctx.nodes().parent_node(node.id()), ctx),
-    }
+fn has_non_void_return_type(node: &AstNode, ctx: &LintContext<'_>) -> bool {
+    let return_type = match node.kind() {
+        AstKind::Program(_) => return false,
+        AstKind::ArrowFunctionExpression(arrow) => arrow.return_type.as_ref(),
+        AstKind::Function(function) => function.return_type.as_ref(),
+        _ => return has_non_void_return_type(ctx.nodes().parent_node(node.id()), ctx),
+    };
+    return_type.is_some_and(|annotation| {
+        !matches!(
+            annotation.type_annotation,
+            TSType::TSVoidKeyword(_) | TSType::TSUndefinedKeyword(_)
+        )
+    })
 }
 
 impl Rule for NoUselessUndefined {
@@ -170,7 +174,7 @@ impl Rule for NoUselessUndefined {
                 match parent_node_kind {
                     // `return undefined`
                     AstKind::ReturnStatement(ret_stmt) => {
-                        if is_has_function_return_type(parent_node, ctx) {
+                        if has_non_void_return_type(parent_node, ctx) {
                             return;
                         }
                         ctx.diagnostic_with_fix(
@@ -204,7 +208,7 @@ impl Rule for NoUselessUndefined {
                             return;
                         }
 
-                        if is_has_function_return_type(parent_node, ctx) {
+                        if arrow.return_type.is_some() {
                             return;
                         }
 
@@ -224,9 +228,6 @@ impl Rule for NoUselessUndefined {
                         if declaration.kind.is_const() {
                             return;
                         }
-                        if is_has_function_return_type(parent_node, ctx) {
-                            return;
-                        }
                         ctx.diagnostic_with_fix(
                             no_useless_undefined_diagnostic(undefined_literal.span),
                             |fixer| {
@@ -241,9 +242,6 @@ impl Rule for NoUselessUndefined {
                     AstKind::AssignmentPattern(assign_pattern) => {
                         let left = &assign_pattern.left;
                         let delete_span = Span::new(left.span().end, undefined_literal.span.end);
-                        if is_has_function_return_type(parent_node, ctx) {
-                            return;
-                        }
                         ctx.diagnostic_with_fix(
                             no_useless_undefined_diagnostic(undefined_literal.span),
                             |fixer| fixer.delete_range(delete_span),
@@ -261,9 +259,6 @@ impl Rule for NoUselessUndefined {
                                 return;
                             };
 
-                            // Removing the default initializer makes this parameter required. Do
-                            // not produce a TypeScript-invalid signature by placing it after an
-                            // optional parameter.
                             let has_preceding_optional_parameter = formal_parameters
                                 .items
                                 .iter()
@@ -273,6 +268,24 @@ impl Rule for NoUselessUndefined {
                                 return;
                             }
 
+                            if ctx.source_type().is_typescript()
+                                && !assign_pattern.pattern.is_binding_identifier()
+                            {
+                                ctx.diagnostic(no_useless_undefined_diagnostic(
+                                    undefined_literal.span,
+                                ));
+                                return;
+                            }
+
+                            let can_be_optional = formal_parameters
+                                .items
+                                .iter()
+                                .skip_while(|parameter| parameter.span != assign_pattern.span)
+                                .skip(1)
+                                .all(|parameter| {
+                                    parameter.optional || parameter.initializer.is_some()
+                                });
+
                             let left = &assign_pattern
                                 .type_annotation
                                 .as_ref()
@@ -280,12 +293,20 @@ impl Rule for NoUselessUndefined {
                                     type_annotation.span.end
                                 });
                             let delete_span = Span::new(*left, undefined_literal.span.end);
-                            if is_has_function_return_type(parent_node, ctx) {
-                                return;
-                            }
                             ctx.diagnostic_with_fix(
                                 no_useless_undefined_diagnostic(undefined_literal.span),
-                                |fixer| fixer.delete_range(delete_span),
+                                |fixer| {
+                                    let mut fix = fixer.delete_range(delete_span);
+                                    if ctx.source_type().is_typescript()
+                                        && !assign_pattern.optional
+                                        && can_be_optional
+                                    {
+                                        fix.push(
+                                            fixer.insert_text_after(&assign_pattern.pattern, "?"),
+                                        );
+                                    }
+                                    fix
+                                },
                             );
                         }
                     }
@@ -457,15 +478,15 @@ fn test() {
         "#,
             None,
         ),
-        ("const foo = (): undefined => {return undefined;}", None),
+        ("const foo = (): number => {return undefined;}", None),
         ("const foo = (): undefined => undefined;", None),
         ("const foo = (): string => undefined;", None),
-        ("const foo = function (): undefined {return undefined}", None),
-        ("export function foo(): undefined {return undefined}", None),
+        ("const foo = function (): number {return undefined}", None),
+        ("export function foo(): number {return undefined}", None),
         (
             r"
                     const object = {
-                        method(): undefined {
+                        method(): number {
                             return undefined;
                         }
                     }
@@ -475,7 +496,7 @@ fn test() {
         (
             r"
             class A {
-                method(): undefined {
+                method(): number {
                     return undefined;
                 }
             }
@@ -485,7 +506,7 @@ fn test() {
         (
             r"
             const A = class A {
-                method(): undefined {
+                method(): number {
                     return undefined
                 }
             };
@@ -495,7 +516,7 @@ fn test() {
         (
             r"
             class A {
-                static method(): undefined {
+                static method(): number {
                     return undefined
                 }
             }
@@ -505,7 +526,7 @@ fn test() {
         (
             r"
             class A {
-                get method(): undefined {
+                get method(): number {
                     return undefined;
                 }
             }
@@ -515,7 +536,7 @@ fn test() {
         (
             r"
             class A {
-                static get method(): undefined {
+                static get method(): number {
                     return undefined;
                 }
             }
@@ -525,7 +546,7 @@ fn test() {
         (
             r"
             class A {
-                #method(): undefined {
+                #method(): number {
                     return undefined;
                 }
             }
@@ -535,7 +556,7 @@ fn test() {
         (
             r"
             class A {
-                private method(): undefined {
+                private method(): number {
                     return undefined;
                 }
             }
@@ -686,14 +707,14 @@ fn test() {
         ),
         ("const {foo = undefined} = {};", "const {foo} = {};", None),
         ("const [foo = undefined] = [];", "const [foo] = [];", None),
-        ("function foo(bar = undefined) {}", "function foo(bar) {}", None),
+        ("function foo(bar = undefined) {}", "function foo(bar?) {}", None),
         ("function foo({bar = undefined}) {}", "function foo({bar}) {}", None),
         ("function foo({bar = undefined} = {}) {}", "function foo({bar} = {}) {}", None),
         ("function foo([bar = undefined]) {}", "function foo([bar]) {}", None),
         ("function foo([bar = undefined] = []) {}", "function foo([bar] = []) {}", None),
         (
             "function foo(x: string | undefined = undefined) { }",
-            "function foo(x: string | undefined) { }",
+            "function foo(x?: string | undefined) { }",
             None,
         ),
         ("return undefined;", "return;", None),
@@ -806,4 +827,62 @@ fn test_trailing_arguments() {
     Tester::new(NoUselessUndefined::NAME, NoUselessUndefined::PLUGIN, pass, fail)
         .expect_fix(fix)
         .test();
+}
+
+#[test]
+fn test_typed_functions() {
+    use crate::tester::Tester;
+
+    let pass = vec![
+        "function f(): number | undefined { return undefined; }",
+        "const f = (): undefined => undefined;",
+        "function f(): number { const g = (): undefined => undefined; return 1; }",
+    ];
+    let cases = [
+        (
+            "function f(p = undefined, q: number): number { return q; }",
+            "function f(p, q: number): number { return q; }",
+        ),
+        ("function f(): void { return undefined; }", "function f(): void { return; }"),
+        ("function f(): undefined { return undefined; }", "function f(): undefined { return; }"),
+        ("const f = (): void => { return undefined; };", "const f = (): void => { return; };"),
+        (
+            "function f(): number { let x = undefined; return 1; }",
+            "function f(): number { let x; return 1; }",
+        ),
+        (
+            "function f(): number { const {x = undefined} = {}; return 1; }",
+            "function f(): number { const {x} = {}; return 1; }",
+        ),
+        ("function f(p = undefined): number { return 1; }", "function f(p?): number { return 1; }"),
+        ("const f = (p = undefined): number => 1;", "const f = (p?): number => 1;"),
+        (
+            "function f([x = undefined]): number { return 1; }",
+            "function f([x]): number { return 1; }",
+        ),
+        (
+            "function f(): number { const g = () => { return undefined; }; return 1; }",
+            "function f(): number { const g = () => { return; }; return 1; }",
+        ),
+    ];
+    let fail = cases.iter().map(|(input, _)| *input).collect();
+    let fix = cases.into_iter().map(|(input, output)| (input, output, None)).collect();
+    Tester::new(NoUselessUndefined::NAME, NoUselessUndefined::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test();
+}
+
+#[test]
+fn test_javascript_parameter_fix() {
+    use crate::tester::Tester;
+
+    Tester::new(
+        NoUselessUndefined::NAME,
+        NoUselessUndefined::PLUGIN,
+        vec![],
+        vec!["function f(p = undefined) {}"],
+    )
+    .change_rule_path_extension("js")
+    .expect_fix(vec![("function f(p = undefined) {}", "function f(p) {}", None)])
+    .test();
 }
