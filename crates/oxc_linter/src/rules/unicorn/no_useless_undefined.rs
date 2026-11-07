@@ -328,7 +328,8 @@ impl Rule for NoUselessUndefined {
                             }
 
                             if ctx.source_type().is_typescript()
-                                && !assign_pattern.pattern.is_binding_identifier()
+                                && (!assign_pattern.pattern.is_binding_identifier()
+                                    || assign_pattern.type_annotation.is_none())
                             {
                                 ctx.diagnostic(no_useless_undefined_diagnostic(
                                     undefined_literal.span,
@@ -976,7 +977,7 @@ fn test() {
         ),
         ("const {foo = undefined} = {};", "const {foo} = {};", None),
         ("const [foo = undefined] = [];", "const [foo] = [];", None),
-        ("function foo(bar = undefined) {}", "function foo(bar?) {}", None),
+        ("function foo(bar = undefined) {}", "function foo(bar = undefined) {}", None),
         ("function foo({bar = undefined}) {}", "function foo({bar}) {}", None),
         ("function foo({bar = undefined} = {}) {}", "function foo({bar} = {}) {}", None),
         ("function foo([bar = undefined]) {}", "function foo([bar]) {}", None),
@@ -1355,8 +1356,8 @@ fn test_typed_functions() {
     ];
     let cases = [
         (
-            "function f(p = undefined, q: number): number { return q; }",
-            "function f(p, q: number): number { return q; }",
+            "function f(p: number | undefined = undefined, q: number): number { return q; }",
+            "function f(p: number | undefined, q: number): number { return q; }",
         ),
         ("function f(): void { return undefined; }", "function f(): void { return; }"),
         ("function f(): undefined { return undefined; }", "function f(): undefined { return; }"),
@@ -1369,8 +1370,14 @@ fn test_typed_functions() {
             "function f(): number { const {x = undefined} = {}; return 1; }",
             "function f(): number { const {x} = {}; return 1; }",
         ),
-        ("function f(p = undefined): number { return 1; }", "function f(p?): number { return 1; }"),
-        ("const f = (p = undefined): number => 1;", "const f = (p?): number => 1;"),
+        (
+            "function f(p: undefined = undefined): number { return 1; }",
+            "function f(p?: undefined): number { return 1; }",
+        ),
+        (
+            "const f = (p: undefined = undefined): number => 1;",
+            "const f = (p?: undefined): number => 1;",
+        ),
         (
             "function f([x = undefined]): number { return 1; }",
             "function f([x]): number { return 1; }",
@@ -1400,4 +1407,20 @@ fn test_javascript_parameter_fix() {
     .change_rule_path_extension("js")
     .expect_fix(vec![("function f(p = undefined) {}", "function f(p) {}", None)])
     .test();
+}
+
+#[test]
+fn test_inferred_parameter_types() {
+    use crate::tester::Tester;
+
+    let fail = vec![
+        "function f(p = undefined): number { return 1; } f();",
+        "const f = (p = undefined): number => 1; f();",
+        "function f(p = undefined, q: number): number { return q; }",
+        "function f(p = undefined) {}",
+    ];
+    let fix = fail.iter().map(|source| (*source, *source, None)).collect();
+    Tester::new(NoUselessUndefined::NAME, NoUselessUndefined::PLUGIN, vec![], fail)
+        .expect_fix(fix)
+        .test();
 }
