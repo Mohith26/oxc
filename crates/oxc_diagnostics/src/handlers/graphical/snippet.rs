@@ -326,6 +326,7 @@ mod tests {
         assert!(output.contains("line0996();"));
         assert!(output.contains("line1000();"));
         assert!(output.lines().count() < 20);
+        insta::assert_snapshot!("collapsed_long_span", output);
     }
 
     #[test]
@@ -337,7 +338,8 @@ mod tests {
                 assert!(output.contains(&format!("line{line:04}();")));
             }
         }
-        assert!(render_span(12, false).contains("..."));
+        insta::assert_snapshot!("span_at_collapse_threshold", render_span(11, false));
+        insta::assert_snapshot!("span_above_collapse_threshold", render_span(12, false));
     }
 
     #[test]
@@ -356,6 +358,7 @@ mod tests {
         assert!(output.contains("line0015();"));
         assert!(output.contains("^^^^"));
         assert_eq!(output.matches("...").count(), 2);
+        insta::assert_snapshot!("collapsed_span_with_inner_label", output);
     }
 
     #[test]
