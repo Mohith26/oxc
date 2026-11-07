@@ -223,7 +223,10 @@ impl Rule for NoUselessUndefined {
                     fixer.replace(conditional.span, replacement)
                 });
             }
-            AstKind::IdentifierReference(undefined_literal) if undefined_literal.is_undefined() => {
+            AstKind::IdentifierReference(undefined_literal)
+                if undefined_literal.is_undefined()
+                    && ctx.is_reference_to_global_variable(undefined_literal) =>
+            {
                 let undefined_node = outermost_paren(node, ctx);
                 let undefined_span = undefined_node.span();
                 let parent_node = ctx.nodes().parent_node(undefined_node.id());
@@ -390,11 +393,15 @@ impl Rule for NoUselessUndefined {
                     return;
                 }
 
+                let is_global_undefined = |expression: &Expression| {
+                    matches!(expression, Expression::Identifier(ident)
+                        if ident.is_undefined() && ctx.is_reference_to_global_variable(ident))
+                };
                 let arguments = &call_expr.arguments;
                 if !arguments
                     .last()
                     .and_then(Argument::as_expression)
-                    .is_some_and(Expression::is_undefined)
+                    .is_some_and(is_global_undefined)
                 {
                     return;
                 }
@@ -410,7 +417,7 @@ impl Rule for NoUselessUndefined {
                 let mut undefined_args_spans = Vec::new();
                 for i in (0..arguments.len()).rev() {
                     let arg = &arguments[i];
-                    if arg.as_expression().is_some_and(Expression::is_undefined) {
+                    if arg.as_expression().is_some_and(is_global_undefined) {
                         let span = arg.span();
                         undefined_args_spans.push(span);
                     } else {
@@ -869,6 +876,14 @@ fn test() {
             "function getBackLinks(subject: string, limit = 16, cursor?: string, reverse = false, ttl: number | undefined = undefined) {}",
             None,
         ),
+        ("function a() { const undefined = 1; let x = undefined; return x; }", None),
+        ("function b(undefined) { { let y = undefined; return y; } }", None),
+        ("function c(undefined) { return undefined; }", None),
+        ("function d(undefined, f) { return f(undefined, undefined); }", None),
+        ("function* e(undefined) { yield undefined; }", None),
+        ("function g(undefined, h = undefined) { return h; }", None),
+        ("const arrow = (undefined) => undefined;", None),
+        ("function defaults(undefined) { const {x = undefined} = {}; }", None),
     ];
 
     let fail = vec![
@@ -1368,6 +1383,8 @@ fn test_safe_initializer_removal() {
         "let [a] = (undefined);",
         "using a = undefined;",
         "async function f() { await using a = undefined; }",
+        "function f(undefined) { let a: number | undefined = ((undefined)); return (undefined); }",
+        "function f(undefined) { const {a = ((undefined))} = {}; }",
     ];
     let fail = vec![
         "let a = /* keep */ undefined;",
