@@ -660,8 +660,7 @@ source: crates/oxc_linter/src/tester.rs
   4 │ │                           setOnTop,
   5 │ │                           false,
   6 │ │                       );
-  7 │ │                   } else {
-  8 │ │                       yield call(
+... · │   
   9 │ │                           setOnTop,
  10 │ │                           true,
  11 │ │                           'normal',

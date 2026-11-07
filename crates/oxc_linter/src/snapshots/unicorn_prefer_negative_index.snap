@@ -73,8 +73,7 @@ source: crates/oxc_linter/src/tester.rs
   4 │ │   
   5 │ │                                           foo.length
   6 │ │   
-  7 │ │                                           // comment 2
-  8 │ │                                           - 1
+... · │   
   9 │ │                                           -1
  10 │ │                                           ,
  11 │ │                                           foo.length // comment 3
