@@ -172,7 +172,40 @@ impl GraphicalReportHandler {
             }
         }
 
-        for line in &lines {
+        let mut visible = vec![false; lines.len()];
+        for (index, line) in lines.iter().enumerate() {
+            if index == 0
+                || index + 1 == lines.len()
+                || labels.iter().any(|label| line.span_applies(label) && !line.span_flyby(label))
+            {
+                let start = index.saturating_sub(4);
+                let end = (index + 5).min(lines.len());
+                visible[start..end].fill(true);
+            }
+        }
+
+        for index in 1..visible.len().saturating_sub(1) {
+            if visible[index - 1] && visible[index + 1] {
+                visible[index] = true;
+            }
+        }
+
+        let mut skipped = false;
+        for (line, visible) in lines.iter().zip(visible) {
+            if !visible {
+                if !skipped {
+                    write_repeated_char(f, ' ', (linum_width + 1).saturating_sub(3))?;
+                    f.write_str("...")?;
+                    f.write_char(' ')?;
+                    f.write_char(self.theme.characters.vbar_break)?;
+                    f.write_char(' ')?;
+                    self.render_line_gutter(f, max_gutter, line, &labels)?;
+                    f.write_char('\n')?;
+                }
+                skipped = true;
+                continue;
+            }
+            skipped = false;
             self.write_linum(f, linum_width, line.number)?;
             self.render_line_gutter(f, max_gutter, line, &labels)?;
             Self::render_line_text(f, line.text)?;
@@ -258,6 +291,72 @@ impl GraphicalReportHandler {
 #[cfg(test)]
 mod tests {
     use super::GraphicalReportHandler;
+
+    fn render_span(line_count: usize, inner_label: bool) -> String {
+        use std::fmt::Write;
+
+        use oxc_span::Span;
+
+        use crate::{GraphicalTheme, OxcDiagnostic};
+
+        let mut source = String::new();
+        for line in 1..=line_count {
+            writeln!(source, "line{line:04}();").unwrap();
+        }
+        let mut labels = vec![Span::new(0, u32::try_from(source.len()).unwrap() - 1)];
+        if inner_label {
+            labels.push(Span::new(12 * 14, 12 * 14 + 4));
+        }
+        let diagnostic =
+            OxcDiagnostic::warn("long span").with_labels(labels).with_source_code(source);
+        let mut output = String::new();
+        GraphicalReportHandler::new_themed(GraphicalTheme::none())
+            .render_report(&mut output, diagnostic.as_ref())
+            .unwrap();
+        output
+    }
+
+    #[test]
+    fn long_spans_collapse_without_losing_endpoints() {
+        let output = render_span(1000, false);
+        assert!(output.contains("..."));
+        assert!(output.contains("line0001();"));
+        assert!(output.contains("line0005();"));
+        assert!(!output.contains("line0006();"));
+        assert!(output.contains("line0996();"));
+        assert!(output.contains("line1000();"));
+        assert!(output.lines().count() < 20);
+    }
+
+    #[test]
+    fn short_spans_remain_complete() {
+        for count in 1..=11 {
+            let output = render_span(count, false);
+            assert!(!output.contains("..."), "{output}");
+            for line in 1..=count {
+                assert!(output.contains(&format!("line{line:04}();")));
+            }
+        }
+        assert!(render_span(12, false).contains("..."));
+    }
+
+    #[test]
+    fn omission_gutters_align_with_source_rows() {
+        for count in [12, 100, 1000] {
+            let output = render_span(count, false);
+            let source_row = output.lines().find(|line| line.contains("line0002")).unwrap();
+            let omission = output.lines().find(|line| line.contains("...")).unwrap();
+            assert_eq!(omission.find(':'), source_row.find('|'), "{output}");
+        }
+    }
+
+    #[test]
+    fn labels_inside_long_spans_remain_visible() {
+        let output = render_span(40, true);
+        assert!(output.contains("line0015();"));
+        assert!(output.contains("^^^^"));
+        assert_eq!(output.matches("...").count(), 2);
+    }
 
     #[test]
     fn direct_locations_match_standard_formatting() {
