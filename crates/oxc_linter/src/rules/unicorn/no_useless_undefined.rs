@@ -284,7 +284,11 @@ impl Rule for NoUselessUndefined {
                         else {
                             return;
                         };
-                        if declaration.kind.is_const() {
+                        if declaration.kind.is_const() || declaration.kind.is_using() {
+                            return;
+                        }
+                        if declaration.kind.is_var() {
+                            ctx.diagnostic(no_useless_undefined_diagnostic(undefined_literal.span));
                             return;
                         }
                         ctx.diagnostic_with_fix(
@@ -962,8 +966,8 @@ fn test() {
         ("function* foo() {yield                 undefined;}", "function* foo() {yield;}", None),
         ("let a = undefined;", "let a;", None),
         ("let a = undefined, b = 2;", "let a, b = 2;", None),
-        ("var a = undefined;", "var a;", None),
-        ("var a = undefined, b = 2;", "var a, b = 2;", None),
+        ("var a = undefined;", "var a = undefined;", None),
+        ("var a = undefined, b = 2;", "var a = undefined, b = 2;", None),
         ("foo(undefined);", "foo();", None),
         ("foo(undefined, undefined);", "foo();", None),
         ("foo(undefined,);", "foo();", None),
@@ -1482,6 +1486,26 @@ fn test_parameter_property_types() {
     ];
     let fix = fail.iter().map(|source| (*source, *source, None)).collect();
     Tester::new(NoUselessUndefined::NAME, NoUselessUndefined::PLUGIN, vec![], fail)
+        .expect_fix(fix)
+        .test();
+}
+
+#[test]
+fn test_var_resets() {
+    use crate::tester::Tester;
+
+    let pass = vec![
+        "function f(): void { using x = undefined; }",
+        "async function f(): Promise<void> { await using x = undefined; }",
+    ];
+    let fail = vec![
+        "function f(): number { for (let i = 0; i < 2; i++) { var x = undefined; if (i === 0) x = 1; } return x ?? 0; }",
+        "function f(): number { var x = 1; var x = undefined; return x ?? 0; }",
+        "function f(): number { var x; do { var x = undefined; } while (condition); return x ?? 0; }",
+        "function f(x): number { var x = undefined; return x ?? 0; }",
+    ];
+    let fix = fail.iter().map(|source| (*source, *source, None)).collect();
+    Tester::new(NoUselessUndefined::NAME, NoUselessUndefined::PLUGIN, pass, fail)
         .expect_fix(fix)
         .test();
 }
