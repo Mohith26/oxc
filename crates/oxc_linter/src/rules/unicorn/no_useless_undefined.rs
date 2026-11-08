@@ -224,7 +224,10 @@ impl Rule for NoUselessUndefined {
                     fixer.replace(conditional.span, replacement)
                 });
             }
-            AstKind::IdentifierReference(undefined_literal) if undefined_literal.is_undefined() => {
+            AstKind::IdentifierReference(undefined_literal)
+                if undefined_literal.is_undefined()
+                    && ctx.is_reference_to_global_variable(undefined_literal) =>
+            {
                 let Some(parent_node) = outermost_paren_parent(node, ctx) else {
                     return;
                 };
@@ -1507,5 +1510,23 @@ fn test_var_resets() {
     let fix = fail.iter().map(|source| (*source, *source, None)).collect();
     Tester::new(NoUselessUndefined::NAME, NoUselessUndefined::PLUGIN, pass, fail)
         .expect_fix(fix)
+        .test();
+}
+
+#[test]
+fn test_shadowed_undefined() {
+    use crate::tester::Tester;
+
+    let pass = vec![
+        "function f(undefined: any): void { return undefined; }",
+        "function f(): void { const undefined: any = 42; return undefined; }",
+        "const f = (undefined: any): void => { return undefined; };",
+        "function f(undefined: any): number { let x = undefined; return x; }",
+        "function f(undefined: any): number { const {x = undefined} = {}; return x; }",
+        "function f(undefined: any, x = undefined): number { return x; }",
+        "function f(undefined: any): number { const g = () => undefined; return g(); }",
+    ];
+    Tester::new(NoUselessUndefined::NAME, NoUselessUndefined::PLUGIN, pass, vec![])
+        .intentionally_allow_no_fix_tests()
         .test();
 }
