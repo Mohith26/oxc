@@ -1,6 +1,6 @@
 ---
 source: crates/oxc_diagnostics/src/handlers/graphical/snippet.rs
-expression: "render_span(12, false)"
+expression: "render_span(13, false)"
 ---
 
   ! long span
@@ -11,9 +11,9 @@ expression: "render_span(12, false)"
   4 | |   line0004();
   5 | |   line0005();
 ... : |   
-  8 | |   line0008();
   9 | |   line0009();
  10 | |   line0010();
  11 | |   line0011();
- 12 | `-> line0012();
+ 12 | |   line0012();
+ 13 | `-> line0013();
     `----

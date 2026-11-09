@@ -23,6 +23,8 @@ use crate::{
     source_impls::{SpanContents, SpanScanner},
 };
 
+const MIN_COLLAPSED_LINES: usize = 3;
+
 impl GraphicalReportHandler {
     pub(super) fn render_snippets(
         &self,
@@ -184,9 +186,9 @@ impl GraphicalReportHandler {
             }
         }
 
-        for index in 1..visible.len().saturating_sub(1) {
-            if visible[index - 1] && visible[index + 1] {
-                visible[index] = true;
+        for run in visible.chunk_by_mut(|left, right| left == right) {
+            if !run[0] && run.len() < MIN_COLLAPSED_LINES {
+                run.fill(true);
             }
         }
 
@@ -195,7 +197,7 @@ impl GraphicalReportHandler {
             if !visible {
                 if !skipped {
                     write_repeated_char(f, ' ', (linum_width + 1).saturating_sub(3))?;
-                    f.write_str("...")?;
+                    write!(f, "{}", "...".style(self.theme.styles.linum))?;
                     f.write_char(' ')?;
                     f.write_char(self.theme.characters.vbar_break)?;
                     f.write_char(' ')?;
@@ -293,11 +295,19 @@ mod tests {
     use super::GraphicalReportHandler;
 
     fn render_span(line_count: usize, inner_label: bool) -> String {
+        render_span_themed(line_count, inner_label, crate::GraphicalTheme::none())
+    }
+
+    fn render_span_themed(
+        line_count: usize,
+        inner_label: bool,
+        theme: crate::GraphicalTheme,
+    ) -> String {
         use std::fmt::Write;
 
         use oxc_span::Span;
 
-        use crate::{GraphicalTheme, OxcDiagnostic};
+        use crate::OxcDiagnostic;
 
         let mut source = String::new();
         for line in 1..=line_count {
@@ -310,7 +320,7 @@ mod tests {
         let diagnostic =
             OxcDiagnostic::warn("long span").with_labels(labels).with_source_code(source);
         let mut output = String::new();
-        GraphicalReportHandler::new_themed(GraphicalTheme::none())
+        GraphicalReportHandler::new_themed(theme)
             .render_report(&mut output, diagnostic.as_ref())
             .unwrap();
         output
@@ -331,20 +341,20 @@ mod tests {
 
     #[test]
     fn short_spans_remain_complete() {
-        for count in 1..=11 {
+        for count in 1..=12 {
             let output = render_span(count, false);
             assert!(!output.contains("..."), "{output}");
             for line in 1..=count {
                 assert!(output.contains(&format!("line{line:04}();")));
             }
         }
-        insta::assert_snapshot!("span_at_collapse_threshold", render_span(11, false));
-        insta::assert_snapshot!("span_above_collapse_threshold", render_span(12, false));
+        insta::assert_snapshot!("span_at_collapse_threshold", render_span(12, false));
+        insta::assert_snapshot!("span_above_collapse_threshold", render_span(13, false));
     }
 
     #[test]
     fn omission_gutters_align_with_source_rows() {
-        for count in [12, 100, 1000] {
+        for count in [13, 100, 1000] {
             let output = render_span(count, false);
             let source_row = output.lines().find(|line| line.contains("line0002")).unwrap();
             let omission = output.lines().find(|line| line.contains("...")).unwrap();
@@ -359,6 +369,37 @@ mod tests {
         assert!(output.contains("^^^^"));
         assert_eq!(output.matches("...").count(), 2);
         insta::assert_snapshot!("collapsed_span_with_inner_label", output);
+    }
+
+    #[test]
+    fn omission_marker_uses_line_number_style() {
+        let output = render_span_themed(13, false, crate::GraphicalTheme::unicode());
+        assert!(output.contains("\x1b[2m...\x1b[0m"));
+        assert!(output.contains("\x1b[2m 1\x1b[0m"));
+        insta::assert_snapshot!("colored_collapsed_span", output);
+    }
+
+    #[test]
+    fn separate_labels_keep_context_around_collapsed_gap() {
+        use oxc_span::Span;
+
+        use crate::{GraphicalTheme, LabeledSpan, source_impls::SpanScanner};
+
+        let source = "statement();\n".repeat(30);
+        let span = Span::new(0, u32::try_from(source.len()).unwrap());
+        let context = LabeledSpan::new(None, 0, span.end);
+        let first = LabeledSpan::new(Some("first".into()), 13, 9);
+        let last = LabeledSpan::new(Some("last".into()), 13 * 28, 9);
+        let mut scanner = SpanScanner::new(source.as_bytes(), 0, 0);
+        let contents = scanner.read_span(span).unwrap();
+        let mut output = String::new();
+        GraphicalReportHandler::new_themed(GraphicalTheme::none())
+            .render_context(&mut output, &context, &contents, &[&first, &last], None)
+            .unwrap();
+        assert_eq!(output.matches("...").count(), 1);
+        assert!(output.contains("first"));
+        assert!(output.contains("last"));
+        insta::assert_snapshot!("separate_labels_with_collapsed_gap", output);
     }
 
     #[test]
